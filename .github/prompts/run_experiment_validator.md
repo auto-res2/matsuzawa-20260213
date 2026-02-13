@@ -21,7 +21,7 @@ Tool Use:
 
 Allowed Files (fixed):
 - Dockerfile (if exists, for environment-related fixes)
-- config/runs/*.yaml
+- config/run/*.yaml
 - src/main.py, src/preprocess.py, src/evaluate.py
 - src/train.py (if exists and training is required)
 - src/inference.py (if exists and inference is required)
