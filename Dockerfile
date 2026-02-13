@@ -25,7 +25,8 @@ WORKDIR /workspace
 
 # Copy dependency files
 COPY pyproject.toml ./
-COPY uv.lock ./uv.lock 2>/dev/null || true
+# Copy uv.lock if it exists (wildcard makes it optional)
+COPY uv.lock* ./
 
 # Install Python dependencies using uv
 # This layer will be cached unless dependencies change
