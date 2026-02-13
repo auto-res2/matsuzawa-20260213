@@ -1,7 +1,7 @@
 # Main configuration for Cross-Reasoning Consistency Auto-CoT experiment
 
 defaults:
-  - runs@run: ???  # Alias: loads from config/runs/, accessible as 'run=' in CLI
+  - /runs@run: ???  # Alias: loads from config/runs/, accessible as 'run=' in CLI
 
 # Execution mode: main, sanity_check, or pilot
 mode: main
