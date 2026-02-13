@@ -523,5 +523,141 @@
     "experimental_code": "import re\nfrom collections import Counter\nimport numpy as np\nfrom datasets import load_dataset\nfrom sklearn.cluster import KMeans\nfrom sentence_transformers import SentenceTransformer\nfrom transformers import pipeline\n\n# ---------------- utilities ----------------\n\ndef extract_last_number(text: str):\n    nums = re.findall(r\"-?\\d+\\.?\\d*\", text)\n    return nums[-1] if nums else None\n\n\ndef majority_prob(ans_list):\n    ans_list = [a for a in ans_list if a is not None]\n    if not ans_list:\n        return None, 0.0, {}\n    ctr = Counter(ans_list)\n    a_star, cnt = ctr.most_common(1)[0]\n    p = cnt / len(ans_list)\n    probs = {a: c/len(ans_list) for a, c in ctr.items()}\n    return a_star, p, probs\n\n\ndef gen_samples(gen, question, prompt, n=5, max_new_tokens=256, temperature=0.7):\n    full = prompt.format(question=question)\n    outs = []\n    for _ in range(n):\n        out = gen(full, max_new_tokens=max_new_tokens, do_sample=True,\n                  temperature=temperature, top_p=0.95)[0][\"generated_text\"]\n        outs.append(out)\n    return outs\n\n\ndef build_demo_base(gen, question):\n    prompt = (\n        \"Solve the problem. Think step by step. End with 'Final answer: <number>'.\\n\\n\"\n        \"Problem: {question}\\n\"\n    )\n    out = gen(prompt.format(question=question), max_new_tokens=256, do_sample=False, temperature=0.0)[0][\"generated_text\"]\n    return f\"Problem: {question}\\n{out.strip()}\\n\"\n\n\ndef build_demo_cw(gen, question, n=5, tau=0.7):\n    prompt = (\n        \"Solve the problem. Think step by step. End with 'Final answer: <number>'.\\n\\n\"\n        \"Problem: {question}\\n\"\n    )\n    outs = gen_samples(gen, question, prompt, n=n)\n    answers = [extract_last_number(o) for o in outs]\n    a_star, p, _ = majority_prob(answers)\n    if a_star is None or p < tau:\n        return None\n    rep = next(o for o in outs if extract_last_number(o) == a_star)\n    return (f\"Problem: {question}\\n{rep.strip()}\\n(consensus={p:.2f})\\n\", p)\n\n\ndef build_demo_xrc(gen, question, nA=5, nB=5, tau=0.49):\n    # Mode A: standard forward CoT\n    promptA = (\n        \"Solve the problem. Think step by step. End with 'Final answer: <number>'.\\n\\n\"\n        \"Problem: {question}\\n\"\n    )\n    # Mode B: verification / alternative path\n    promptB = (\n        \"Solve the problem. Then independently VERIFY the result by recomputing or plugging it back. \"\n        \"If verification fails, correct it. End with 'Final answer: <number>'.\\n\\n\"\n        \"Problem: {question}\\n\"\n    )\n\n    outsA = gen_samples(gen, question, promptA, n=nA)\n    outsB = gen_samples(gen, question, promptB, n=nB)\n\n    ansA = [extract_last_number(o) for o in outsA]\n    ansB = [extract_last_number(o) for o in outsB]\n\n    aA, pA, probsA = majority_prob(ansA)\n    aB, pB, probsB = majority_prob(ansB)\n    if aA is None or aB is None:\n        return None\n\n    # cross-reasoning reliability: max_a pA(a)*pB(a)\n    common = set(probsA) | set(probsB)\n    best_a, best_r = None, 0.0\n    for a in common:\n        r = probsA.get(a, 0.0) * probsB.get(a, 0.0)\n        if r > best_r:\n            best_r, best_a = r, a\n\n    # Require modal agreement to emphasize independence and reduce ambiguous cases\n    if aA != aB:\n        return None\n    if best_a != aA:\n        # modes agree on their modes, but product-max differs (rare); be conservative\n        return None\n    if best_r < tau:\n        return None\n\n    rep = next(o for o in outsA if extract_last_number(o) == best_a)\n    demo = f\"Problem: {question}\\n{rep.strip()}\\n(xrc={best_r:.2f}, pA={pA:.2f}, pB={pB:.2f})\\n\"\n    return demo, best_r\n\n\ndef make_clusters(questions, k=8, embed_model_name=\"sentence-transformers/all-MiniLM-L6-v2\"):\n    emb = SentenceTransformer(embed_model_name)\n    X = emb.encode(questions, normalize_embeddings=True, show_progress_bar=False)\n    km = KMeans(n_clusters=k, random_state=0, n_init=\"auto\").fit(X)\n    return X, km\n\n\ndef candidates_by_centroid(X, km, questions, cluster_id, m=10):\n    idx = np.where(km.labels_ == cluster_id)[0]\n    if len(idx) == 0:\n        return []\n    center = km.cluster_centers_[cluster_id]\n    sims = X[idx] @ center\n    order = idx[np.argsort(-sims)]\n    return [questions[i] for i in order[:m]]\n\n\ndef build_demos(gen, pool_questions, k=8, per_cluster_candidates=10, mode=\"base\",\n               cw_n=5, cw_tau=0.7, xrc_nA=5, xrc_nB=5, xrc_tau=0.49):\n    X, km = make_clusters(pool_questions, k=k)\n    demos = []\n    scores = []\n    for c in range(k):\n        cand_qs = candidates_by_centroid(X, km, pool_questions, c, m=per_cluster_candidates)\n        best = None\n        best_score = -1.0\n        for q in cand_qs:\n            if mode == \"base\":\n                # accept first\n                demo = build_demo_base(gen, q)\n                best, best_score = demo, 1.0\n                break\n            elif mode == \"cw\":\n                built = build_demo_cw(gen, q, n=cw_n, tau=cw_tau)\n                if built is None:\n                    continue\n                demo, sc = built\n                if sc > best_score:\n                    best, best_score = demo, sc\n            elif mode == \"xrc\":\n                built = build_demo_xrc(gen, q, nA=xrc_nA, nB=xrc_nB, tau=xrc_tau)\n                if built is None:\n                    continue\n                demo, sc = built\n                if sc > best_score:\n                    best, best_score = demo, sc\n            else:\n                raise ValueError(mode)\n        if best is not None:\n            demos.append(best)\n            scores.append(best_score)\n\n    # Order strongest reliability first\n    order = np.argsort(-np.array(scores)) if scores else []\n    demos = [demos[i] for i in order]\n    return \"\\n\".join(demos) + \"\\n\", len(demos)\n\n\ndef evaluate(gen, demos_text, test_items, max_new_tokens=256):\n    correct = 0\n    for ex in test_items:\n        q = ex[\"question\"]\n        gold = extract_last_number(ex[\"answer\"])\n        prompt = (\n            \"Solve the problem. Think step by step. End with 'Final answer: <number>'.\\n\\n\"\n            + demos_text +\n            f\"Problem: {q}\\n\"\n        )\n        pred = gen(prompt, max_new_tokens=max_new_tokens, do_sample=False, temperature=0.0)[0][\"generated_text\"]\n        pred_ans = extract_last_number(pred)\n        correct += int(pred_ans == gold)\n    return correct / len(test_items)\n\n\ndef run():\n    gen = pipeline(\"text2text-generation\", model=\"google/flan-t5-base\")\n\n    ds = load_dataset(\"gsm8k\", \"main\")\n    pool_q = [x[\"question\"] for x in ds[\"train\"].select(range(1000))]\n    test = ds[\"test\"].select(range(200))\n\n    k = 8\n    base_prompt, n_base = build_demos(gen, pool_q, k=k, mode=\"base\")\n    cw_prompt, n_cw = build_demos(gen, pool_q, k=k, mode=\"cw\", cw_n=5, cw_tau=0.7)\n    xrc_prompt, n_xrc = build_demos(gen, pool_q, k=k, mode=\"xrc\", xrc_nA=5, xrc_nB=5, xrc_tau=0.49)\n\n    acc_base = evaluate(gen, base_prompt, test)\n    acc_cw = evaluate(gen, cw_prompt, test)\n    acc_xrc = evaluate(gen, xrc_prompt, test)\n\n    print({\n        \"accuracy_base\": acc_base,\n        \"accuracy_cw\": acc_cw,\n        \"accuracy_xrc\": acc_xrc,\n        \"n_demos_base\": n_base,\n        \"n_demos_cw\": n_cw,\n        \"n_demos_xrc\": n_xrc,\n    })\n\nif __name__ == \"__main__\":\n    run()\n",
     "expected_result": "On GSM8K (200-question subset) with flan-t5-base (prompt-only):\n- Auto-CoT (base): accuracy ≈ 0.18–0.25\n- CW-AutoCoT (within-prompt self-consistency for demos; n=5, τ=0.7): ≈ 0.20–0.28\n- XRC-AutoCoT (cross-reasoning; nA=nB=5, τ=0.49): ≈ 0.22–0.31\nExpected gains:\n- XRC over Auto-CoT: +0.03 to +0.06 absolute accuracy.\n- XRC over CW: +0.01 to +0.03 absolute accuracy.\n\nAdditional expected observations (secondary, not the primary metric):\n- XRC will have fewer “confidently-wrong” demos: lower rate of demos where the demo’s final answer disagrees with the dataset label when checked offline (for analysis only).\n- XRC pass-rate per cluster may be slightly lower than CW at the same compute budget, but selecting the best-per-cluster among the top M candidates recovers close to k demos (typically 6–8/8).\n\nCompute: demo construction cost is ~nA+nB generations per candidate, but bounded by per_cluster_candidates (e.g., 10), and evaluation remains single deterministic generation per test item.",
     "expected_conclusion": "XRC-AutoCoT improves Auto-CoT’s robustness with a prompt-only, label-free verification signal that is stronger than standard self-consistency: *cross-reasoning agreement* across two distinct solution/verification prompts. This targets the key unresolved weakness in consensus filtering—confidently-wrong demos caused by systematic biases—while preserving Auto-CoT’s diversity via best-per-cluster selection rather than global filtering that collapses onto easy examples.\n\nAcademic value: provides evidence that in-context learning is sensitive not just to demo correctness but to *independent corroboration structure* in demo construction, offering a principled, prompt-based reliability proxy (pA·pB) that can be studied across tasks and models.\n\nSocial/practical value: reduces harmful prompt contamination from incorrect rationales in automatically constructed prompts—important for educational and decision-support use where wrong worked examples can strongly mislead—without requiring fine-tuning, labels, or heavy infrastructure."
+  },
+  "experimental_design": {
+    "experiment_summary": "Task: automatically construct a small set of in-context chain-of-thought (CoT) demonstrations from an unlabeled training pool, then use those demos to solve held-out math word problems by generating a final numeric answer.\n\nPurpose: test the hypothesis that Auto-CoT brittleness is often *systematic* (the model repeatedly produces the same wrong answer), so within-prompt self-consistency (CW-AutoCoT) can still accept “confidently-wrong” demonstrations; and that aggressive filtering harms diversity/coverage. The proposed method, Cross-Reasoning Consistency Auto-CoT (XRC-AutoCoT), rejects demos that are stable-but-wrong by requiring *cross-prompt* agreement between two different reasoning modes, while still preserving diversity by selecting (at most) one accepted demo per cluster.\n\nWorkflow (per dataset):\n1) Unlabeled demo pool: sample N_pool=1,000 questions from the dataset’s training split (no answers used).\n2) Diversity clustering: embed questions with a sentence encoder, run k-means with k=8 clusters, and for each cluster take the top M=10 questions closest to the centroid as candidates.\n3) Demo construction:\n   - Comparative method (CW-AutoCoT): for each candidate q, sample n=5 solutions with a single Forward-CoT prompt, compute the modal answer probability p=max_a p(a), accept if p>=tau_cw, and choose the highest-p candidate in the cluster.\n   - Proposed (XRC-AutoCoT): for each candidate q, sample nA=5 solutions with Mode A (Forward-CoT) and nB=5 with Mode B (Solve+Verify / backward check). Extract final answers, compute per-mode distributions pA(a), pB(a), define r(q)=max_a pA(a)*pB(a); accept if (modalA==modalB) and r(q)>=tau_xrc; pick the highest-r accepted candidate in the cluster and order final demos by decreasing r.\n4) Evaluation: on a held-out test subset (N_test=200 per dataset), run deterministic decoding (temperature=0) using the same model, conditioned on the constructed demos. Extract the predicted final numeric answer and score with exact numeric match.\n\nScale fit to Runner (H200 140GB / 240GB RAM):\n- Single GPU inference-only; no fine-tuning.\n- Bounded generation budget by (k=8 clusters) × (M=10 candidates) × (nA+nB=10 samples) → worst-case 800 generations for XRC demo building per dataset, plus 200 deterministic generations for evaluation. With a 4B model in bf16, this comfortably fits the GPU memory and finishes in hours (typically far less) on the provided Runner.\n- Subsampling (N_pool=1,000; N_test=200) ensures reproducibility and low cost while still being large enough to show consistent directional effects.\n\nExpected outcome: XRC-AutoCoT yields higher downstream accuracy than CW-AutoCoT by filtering out systematically wrong demonstrations that survive within-prompt consensus, without collapsing diversity (still ~6–8 demos across 8 clusters).",
+    "runner_config": {
+      "runner_label": [
+        "self-hosted",
+        "gpu-runner"
+      ],
+      "description": "NVIDIA H200, VRAM: 140 GB, RAM: 240 GB"
+    },
+    "evaluation_metrics": [
+      {
+        "name": "accuracy",
+        "description": "Primary metric. Measures how often the model’s predicted final numeric answer exactly matches the gold answer.\n\nCorrectness criteria:\n- Parse the model output for the final numeric answer using a robust extractor (e.g., last occurrence of a signed number with optional decimal).\n- Normalize numbers by:\n  1) stripping commas,\n  2) converting to Decimal (or float) when possible,\n  3) treating integers and equivalent decimals as equal (e.g., \"5\" == \"5.0\").\n- A prediction is correct if the normalized predicted number equals the normalized gold number exactly. (For these datasets, answers are typically integers; exact numeric equality is appropriate.)\n\nCalculation method:\n- Let N be the number of evaluated problems. For each problem i, define I_i = 1 if pred_i == gold_i else 0.\n- accuracy = (1/N) * sum_{i=1..N} I_i.\n\nTask appropriateness:\n- The task is math word-problem solving where the evaluation target is the final numeric result; the intermediate rationale may vary, so scoring the final number is the standard and most meaningful end-to-end measure.\n\nRelevant visualizations:\n- Bar chart of accuracy by method (CW vs XRC) with bootstrap 95% confidence intervals.\n- Paired per-item correctness scatter (CW correct? vs XRC correct?) or a 2×2 contingency table heatmap to show which items improve/regress."
+      },
+      {
+        "name": "demo_pass_rate_per_cluster",
+        "description": "Secondary diagnostic metric to quantify diversity retention and filtering aggressiveness.\n\nCorrectness criteria:\n- A cluster is counted as \"passed\" if the method selects an accepted demo for that cluster (after evaluating up to M candidates).\n\nCalculation method:\n- For each cluster c in {1..k}, define P_c = 1 if a demo was selected else 0.\n- demo_pass_rate_per_cluster = (1/k) * sum_c P_c.\n- Also report n_demos = sum_c P_c as an interpretable raw count.\n\nTask appropriateness:\n- The hypothesis includes a second failure mode where filtering keeps only easy demos and shrinks coverage. Pass rate per cluster directly measures whether the method still produces a diverse demo set across clusters.\n\nRelevant visualizations:\n- Histogram of selected-demo cluster sizes (or simply a per-cluster pass/fail heatmap).\n- Bar plot of pass rate (or n_demos) by method."
+      },
+      {
+        "name": "xrc_reliability_score_stats",
+        "description": "Secondary diagnostic metric for the proposed method, summarizing the cross-reasoning reliability scores r(q)=max_a pA(a)*pB(a) of the selected demos.\n\nCorrectness criteria:\n- For each selected demo question q, compute answer distributions in Mode A and Mode B from nA and nB samples; compute r(q) as defined.\n\nCalculation method:\n- Report mean, median, and min of r across selected demos.\n- Optionally report (pA_mode, pB_mode) for each selected demo to diagnose whether reliability comes from one mode dominating.\n\nTask appropriateness:\n- r(q) is the core selection signal of XRC-AutoCoT; reporting its distribution verifies the method is operating as intended and supports analysis of the reliability–accuracy relationship.\n\nRelevant visualizations:\n- Violin/box plot of r(q) over selected demos.\n- Scatter plot of r(q) vs whether the corresponding demo’s answer matches the dataset label (offline analysis) to check whether higher r correlates with correctness."
+      }
+    ],
+    "models_to_use": [
+      "Qwen3-4B (4B parameters)"
+    ],
+    "datasets_to_use": [
+      "gsm8k",
+      "SVAMP"
+    ],
+    "proposed_method": {
+      "method_name": "XRC-AutoCoT (Cross-Reasoning Consistency Auto-CoT)",
+      "description": "Prompt-only, label-free Auto-CoT demonstration construction that preserves diversity via clustering but filters systematically wrong demonstrations via *cross-prompt* agreement. For each candidate demo question within each cluster, sample solutions under two distinct reasoning prompts (Forward-CoT vs Solve+Verify). Accept/select demos based on cross-mode modal agreement and a reliability score r(q)=max_a pA(a)·pB(a), then pick the best demo per cluster and order demos by reliability.",
+      "optuna_config": {
+        "enabled": true,
+        "n_trials": 20,
+        "search_spaces": [
+          {
+            "param_name": "xrc_tau",
+            "distribution_type": "uniform",
+            "low": 0.25,
+            "high": 0.81
+          },
+          {
+            "param_name": "nA",
+            "distribution_type": "categorical",
+            "choices": [
+              3,
+              5
+            ]
+          },
+          {
+            "param_name": "nB",
+            "distribution_type": "categorical",
+            "choices": [
+              3,
+              5
+            ]
+          },
+          {
+            "param_name": "temperature",
+            "distribution_type": "uniform",
+            "low": 0.3,
+            "high": 0.9
+          },
+          {
+            "param_name": "k_clusters",
+            "distribution_type": "categorical",
+            "choices": [
+              6,
+              8,
+              10
+            ]
+          },
+          {
+            "param_name": "per_cluster_candidates_M",
+            "distribution_type": "categorical",
+            "choices": [
+              5,
+              10
+            ]
+          }
+        ]
+      }
+    },
+    "comparative_methods": [
+      {
+        "method_name": "CW-AutoCoT (Within-Prompt Self-Consistency Filtering)",
+        "description": "Auto-CoT-style diverse clustering, but demonstration acceptance is based on within-prompt self-consistency: sample n solutions using a single Forward-CoT prompt, compute the modal answer probability p=max_a p(a), accept if p≥tau_cw, and choose the highest-p demo per cluster. This can still accept systematically wrong demos when the model confidently repeats the same error.",
+        "optuna_config": {
+          "enabled": true,
+          "n_trials": 20,
+          "search_spaces": [
+            {
+              "param_name": "cw_tau",
+              "distribution_type": "uniform",
+              "low": 0.5,
+              "high": 0.9
+            },
+            {
+              "param_name": "cw_n",
+              "distribution_type": "categorical",
+              "choices": [
+                3,
+                5,
+                7
+              ]
+            },
+            {
+              "param_name": "temperature",
+              "distribution_type": "uniform",
+              "low": 0.3,
+              "high": 0.9
+            },
+            {
+              "param_name": "k_clusters",
+              "distribution_type": "categorical",
+              "choices": [
+                6,
+                8,
+                10
+              ]
+            },
+            {
+              "param_name": "per_cluster_candidates_M",
+              "distribution_type": "categorical",
+              "choices": [
+                5,
+                10
+              ]
+            }
+          ]
+        }
+      }
+    ]
   }
 }
