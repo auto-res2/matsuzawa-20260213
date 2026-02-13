@@ -1,5 +1,4 @@
-# Main configuration for Hydra
-# This file will be populated by AI code generator based on experimental design
+# Main configuration for Cross-Reasoning Consistency Auto-CoT experiment
 
 defaults:
   - runs@run: ???  # Alias: loads from config/runs/, accessible as 'run=' in CLI
@@ -10,8 +9,11 @@ mode: main
 # Results output directory
 results_dir: .research/results
 
-# WandB configuration (will be set by AI agent)
+# Cache directory for datasets and models
+cache_dir: .cache
+
+# WandB configuration
 wandb:
-  entity: ???
-  project: ???
+  entity: airas
+  project: 2026-02-13
   mode: online

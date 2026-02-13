@@ -1,5 +1,5 @@
-# Base Dockerfile for AIRAS ML Experiments
-# This provides a reproducible environment for all experiment stages
+# Dockerfile for Cross-Reasoning Consistency Auto-CoT Experiment
+# Provides reproducible environment for prompt tuning and LLM inference
 
 FROM python:3.11-slim
 
@@ -34,8 +34,8 @@ RUN uv sync --frozen || uv sync
 # Copy the rest of the application
 COPY . .
 
-# Create results directory
-RUN mkdir -p .research/results
+# Create cache and results directories
+RUN mkdir -p .cache .research/results
 
 # Default command (can be overridden in workflow)
 CMD ["bash"]

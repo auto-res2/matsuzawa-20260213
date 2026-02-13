@@ -1,0 +1,39 @@
+# CW-AutoCoT (Comparative Baseline) on AQUA-RAT with GPT-4o
+
+run_id: comparative-1-gpt4o-aqua
+
+method:
+  name: cw_autocot
+  type: comparative
+  index: 1
+  description: "Cluster-Within consistency Auto-CoT baseline (self-consistency only)"
+  
+  # Demo construction parameters
+  n_pool: 1000  # Sample from training set
+  n_clusters: 8  # Diversity clustering
+  candidates_per_cluster: 10  # Top M closest to centroid
+  
+  # Sampling parameters for CW
+  n_samples: 5  # Forward CoT samples (single mode)
+  temperature: 0.7  # For diverse sampling during demo construction
+  
+  # Acceptance threshold
+  tau_cw: 0.6  # Within-mode consistency threshold p >= tau_cw
+  
+  # Reasoning mode (single prompt)
+  prompt: "Think step by step to solve this problem. End your response with 'Final answer: [your numeric answer]'."
+
+model:
+  name: gpt-4o
+  provider: openai
+  api_base: null
+  max_tokens: 1000
+  temperature_eval: 0.0  # Deterministic for evaluation
+
+dataset:
+  name: aqua
+  n_test: 200  # Held-out test subset size
+  
+inference:
+  max_demos: 8  # Maximum demos to use (one per cluster)
+  order_by_reliability: true  # Order demos by decreasing p(modal)
