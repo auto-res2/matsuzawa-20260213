@@ -157,7 +157,9 @@ jobs:
             echo "=== [UV SYNC] Finished successfully at $(date -u) ==="
 
             echo "=== [SANITY RUN] Start for $RUN_ID at $(date -u) ==="
-            uv run python -u -m src.main runs=$RUN_ID results_dir="$RESULTS_DIR" mode=sanity_check
+            uv run python -u -m src.main run=$RUN_ID \
+              results_dir="$RESULTS_DIR" \
+              mode=sanity_check
             echo -e "=== [SANITY RUN] PASSED for $RUN_ID at $(date -u) ===\n"
           )> >(tee -a "$RESULTS_DIR/stdout.txt") 2> >(tee -a "$RESULTS_DIR/stderr.txt" >&2)
 
