@@ -1,9 +1,6 @@
 defaults:
   - _self_
-  - runs@run:  # Alias: loads from config/runs/, accessible as 'run=' in CLI
-
-# Run configuration (populated from config/runs/)
-run: ???
+  - run: ???  # loads from config/run/, accessible as 'run=' in CLI
 
 # Execution mode: main, sanity_check, or pilot
 mode: main
