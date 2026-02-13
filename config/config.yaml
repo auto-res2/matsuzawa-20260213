@@ -1,9 +1,9 @@
-# Main configuration for Hydra
-# This file will be populated by AI code generator based on experimental design
-
 defaults:
   - _self_
-  - run: ???  # loads from config/run/, accessible as 'run=' in CLI
+  - runs@run:  # Alias: loads from config/runs/, accessible as 'run=' in CLI
+
+# Run configuration (populated from config/runs/)
+run: ???
 
 # Execution mode: main, sanity_check, or pilot
 mode: main
@@ -11,8 +11,11 @@ mode: main
 # Results output directory
 results_dir: .research/results
 
-# WandB configuration (will be set by AI agent)
+# Cache directory for datasets and models
+cache_dir: .cache
+
+# WandB configuration
 wandb:
-  entity: ???
-  project: ???
+  entity: airas
+  project: 2026-02-13
   mode: online
